@@ -8,7 +8,7 @@ Each run:
   3. Opens each new offer to get full details.
   4. Adds them as rows to een_offers.xlsx (full history, one row per offer).
   5. Emails one digest: Title, Location, Type of partnership, Market keywords,
-     Description, Link - with the full Excel file attached.
+     Description, Link - with a download link to the full Excel file.
   5. Saves the seen list (seen_een.json) only after the email is sent,
      so a crash never loses offers - they are simply picked up next run.
 
@@ -30,7 +30,6 @@ import smtplib
 import sys
 import time
 from datetime import datetime, timezone, timedelta
-from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -265,6 +264,64 @@ def keyword_name(k):
     return re.sub(r"^\s*\d+\s*-\s*", "", k).strip()
 
 
+SHEET_ID = os.environ.get("EEN_SHEET_ID", "").strip()
+SHEET_KEY = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+
+
+def offer_row(o, today):
+    return [
+        today, o["ref"], o["title"], o["location"],
+        o.get("posted", ""), o.get("valid_until", ""), ", ".join(o.get("targets") or []),
+        ", ".join(o["partnership"]), "\n".join(o["market_keywords"]),
+        o["description"][:30000], o["link"],
+    ]
+
+
+def save_to_sheet(offers):
+    """Add new offers to the Google Sheet. Skips references already there, so a re-run never doubles rows.
+    On the very first use it also copies over everything already in the Excel file."""
+    import gspread
+    gc = gspread.service_account_from_dict(json.loads(SHEET_KEY))
+    ws = gc.open_by_key(SHEET_ID).sheet1
+
+    header = ws.row_values(1)
+    if not header:
+        ws.update(range_name="A1", values=[EXCEL_COLUMNS])
+        ws.format("A1:K1", {"textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+                            "backgroundColor": {"red": 0.04, "green": 0.33, "blue": 0.58}})
+        ws.freeze(rows=1)
+        if os.path.exists(EXCEL_FILE):  # bring over the offers collected before the switch
+            old = [list(r) for r in load_workbook(EXCEL_FILE).active.iter_rows(min_row=2, values_only=True)]
+            old = [[("" if v is None else str(v)) for v in r] for r in old if r and r[1]]
+            if old and len(old[0]) == len(EXCEL_COLUMNS):
+                ws.append_rows(old, value_input_option="RAW")
+                print(f"Sheet: copied {len(old)} offers from the Excel file")
+
+    existing = set(ws.col_values(2))
+    today = datetime.now(timezone(timedelta(hours=7))).strftime("%Y-%m-%d")
+    rows = [offer_row(o, today) for o in offers if o["ref"] not in existing]
+    if rows:
+        ws.append_rows(rows, value_input_option="RAW")
+    print(f"Sheet: added {len(rows)} row(s)")
+
+
+def save_offers(offers):
+    """Google Sheet if it is set up, otherwise the Excel file in the repo."""
+    if SHEET_ID and SHEET_KEY:
+        save_to_sheet(offers)
+    else:
+        save_to_excel(offers)
+
+
+def excel_link():
+    """Link for the email: the Google Sheet if set up, otherwise the Excel file in the GitHub repo."""
+    if SHEET_ID and SHEET_KEY:
+        return f"https://docs.google.com/spreadsheets/d/{SHEET_ID}"
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    branch = os.environ.get("GITHUB_REF_NAME", "main")
+    return f"https://github.com/{repo}/raw/{branch}/{EXCEL_FILE}" if repo else ""
+
+
 FONT = "font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;"  # no quotes - styles sit inside '...'
 NAVY = "#0b2e59"
 
@@ -322,6 +379,7 @@ def offer_card(o):
 
 def build_email(offers):
     e = html.escape
+    link = excel_link()
     today = datetime.now(timezone(timedelta(hours=7))).strftime("%d %b %Y")
     n = len(offers)
     subject = f"EEN Business Offers - {n} new - {today}"
@@ -348,7 +406,11 @@ def build_email(offers):
         f"<div style='{FONT}font-size:14px;color:#d5deea'>{today}</div>"
         f"<div style='{FONT}font-size:13px;line-height:20px;color:#d5deea;margin-top:12px;"
         f"border-top:1px solid #2c4c78;padding-top:12px'>{by_country}</div>"
-        "</td></tr></table>",
+        + (f"<a href='{e(link)}' style='{FONT}display:inline-block;margin-top:14px;font-size:13px;"
+           f"font-weight:600;color:{NAVY};background:#ffffff;text-decoration:none;border-radius:6px;"
+           f"padding:8px 14px'>{'Open sheet' if SHEET_ID and SHEET_KEY else 'Download Excel'} - all offers &rarr;</a>"
+           if link else "")
+        + "</td></tr></table>",
     ]
     for c in order:
         parts.append(
@@ -358,8 +420,9 @@ def build_email(offers):
         parts.extend(offer_card(o) for o in groups[c])
     parts.append(
         f"<div style='{FONT}font-size:12px;line-height:18px;color:#8a94a3;text-align:center;margin:20px 0 0'>"
-        "Full descriptions of all offers are in the attached Excel file.<br>"
-        "Source: Enterprise Europe Network - een.ec.europa.eu/partnering-opportunities</div>"
+        + (f"Full descriptions of all offers: <a href='{e(link)}' style='color:#6b7686'>all offers sheet</a><br>"
+           if link else "")
+        + "Source: Enterprise Europe Network - een.ec.europa.eu/partnering-opportunities</div>"
         "</td></tr></table></div>"
     )
     return subject, "".join(parts)
@@ -389,12 +452,7 @@ def send_email(subject, body, text=""):
     content = MIMEMultipart("alternative")
     content.attach(MIMEText(text or subject, "plain", "utf-8"))
     content.attach(MIMEText(body, "html", "utf-8"))
-    msg.attach(content)
-    if os.path.exists(EXCEL_FILE):
-        with open(EXCEL_FILE, "rb") as f:
-            part = MIMEApplication(f.read(), Name=os.path.basename(EXCEL_FILE))
-        part["Content-Disposition"] = f'attachment; filename="{os.path.basename(EXCEL_FILE)}"'
-        msg.attach(part)
+    msg.attach(content)  # no attachment - the email links to the Excel file in the repo instead
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
         s.login(user, pwd)
         s.sendmail(user, to, msg.as_string())
@@ -426,7 +484,7 @@ def main():
         time.sleep(DELAY)
 
     if offers:
-        save_to_excel(offers)
+        save_offers(offers)
         subject, body = build_email(offers)
         send_email(subject, body, build_text(offers))
     else:
