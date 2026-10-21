@@ -6,7 +6,7 @@ on:
   workflow_dispatch:        # lets you run it by hand from the Actions tab
 
 permissions:
-  contents: write           # needed to save seen_een.json back to the repo
+  contents: write           # needed to save seen_een.json and een_offers.xlsx back to the repo
 
 concurrency:
   group: een-monitor
@@ -24,7 +24,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install packages
-        run: pip install requests beautifulsoup4
+        run: pip install requests beautifulsoup4 openpyxl
 
       - name: Check EEN and send email
         env:
@@ -39,5 +39,6 @@ jobs:
           git config user.name "een-bot"
           git config user.email "een-bot@users.noreply.github.com"
           git add seen_een.json || true
+          git add een_offers.xlsx || true
           git diff --cached --quiet || git commit -m "Update seen EEN offers"
           git push || true
