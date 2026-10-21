@@ -326,55 +326,148 @@ FONT = "font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;"  
 NAVY = "#0b2e59"
 
 
-def facts_box(o):
-    """Posted / Valid until / Target market - only the ones we have."""
+SEA_COUNTRIES = ["Vietnam", "Thailand", "Malaysia", "Singapore", "Indonesia", "Philippines",
+                 "Cambodia", "Laos", "Myanmar", "Brunei", "Timor Leste"]
+GREEN = "#1e7b4f"
+
+
+def sea_status(o):
+    """'named' = targets a Southeast Asian country by name, 'all' = targets all countries, '' = neither."""
+    targets = o.get("targets") or []
+    named = [t for t in targets if t in SEA_COUNTRIES]
+    if named:
+        return "named", named
+    if any(t.lower() == "all countries" for t in targets):
+        return "all", []
+    return "", []
+
+
+# Sector from EEN market keyword codes (first digits). Generic codes count for less.
+SECTOR_ORDER = ["Food & agriculture", "Consumer goods", "Health & life sciences",
+                "Industrial & materials", "Energy & environment", "Construction",
+                "Logistics & transport", "Software & IT", "Services", "Other"]
+SECTOR_PREFIX = [  # longest prefix wins
+    ("05008", "Food & agriculture"), ("05009", "Food & agriculture"), ("07003", "Food & agriculture"),
+    ("09005", "Food & agriculture"),
+    ("07001", "Consumer goods"), ("07002", "Consumer goods"), ("07004", "Consumer goods"),
+    ("09004", "Industrial & materials"), ("09006", "Industrial & materials"),
+    ("07005", "Services"), ("09002", "Services"), ("09003", "Services"), ("09009", "Services"),
+    ("08004", "Energy & environment"), ("09008", "Energy & environment"),
+    ("09001", "Logistics & transport"), ("08006", "Logistics & transport"),
+    ("09007", "Construction"),
+    ("01", "Software & IT"), ("02", "Software & IT"),
+    ("03", "Industrial & materials"), ("08", "Industrial & materials"),
+    ("04", "Health & life sciences"), ("05", "Health & life sciences"),
+    ("06", "Energy & environment"),
+]
+GENERIC_CODES = {"09003004", "09004008", "07002005", "07004008", "09003007", "08005", "07006",
+                 "05007007", "08001023"}
+
+
+def sector_of(o):
+    score = {}
+    for k in o.get("market_keywords") or []:
+        code = (re.match(r"\s*(\d+)", k) or [None, ""])[1]
+        if not code:
+            continue
+        sector = next((s for p, s in sorted(SECTOR_PREFIX, key=lambda x: -len(x[0])) if code.startswith(p)), None)
+        if sector:
+            score[sector] = score.get(sector, 0) + (0.5 if code in GENERIC_CODES else 1)
+    if not score:
+        return "Other"
+    return max(score, key=lambda s: (score[s], -SECTOR_ORDER.index(s)))
+
+
+def month_year(d):
+    """'20 Oct 2027' -> 'Oct 2027'"""
+    return d.split(" ", 1)[1] if d and " " in d else d
+
+
+def facts_line(o):
+    """One grey line: Posted 20 Oct 2026 (updated ...) - valid to Oct 2027 - Target: ..."""
     e = html.escape
-    label = f"style='{FONT}font-size:12px;line-height:18px;color:#6b7686;padding:2px 12px 2px 0;white-space:nowrap;vertical-align:top'"
-    value = f"style='{FONT}font-size:13px;line-height:18px;color:#2b2f36;padding:2px 0;vertical-align:top'"
-    rows = []
+    bits = []
     if o.get("posted"):
-        upd = f" <span style='color:#8a94a3'>(updated {e(o['updated'])})</span>" if o.get("updated") else ""
-        rows.append(("Posted", e(o["posted"]) + upd))
+        upd = f" (updated {e(o['updated'])})" if o.get("updated") else ""
+        bits.append(f"Posted {e(o['posted'])}{upd}")
     if o.get("valid_until"):
-        rows.append(("Valid until", e(o["valid_until"])))
+        bits.append(f"valid to {e(month_year(o['valid_until']))}")
     targets = o.get("targets") or []
     if targets:
-        shown = ", ".join(targets[:8]) + (f" +{len(targets) - 8} more" if len(targets) > 8 else "")
-        rows.append(("Target market", e(shown)))
-    if not rows:
+        shown = ", ".join(targets[:6]) + (f" +{len(targets) - 6} more" if len(targets) > 6 else "")
+        bits.append(f"Target: {e(shown)}")
+    if not bits:
         return ""
-    body = "".join(f"<tr><td {label}>{k}</td><td {value}>{v}</td></tr>" for k, v in rows)
-    return ("<table role='presentation' cellpadding='0' cellspacing='0' "
-            "style='background:#f7f9fb;border-radius:6px;margin:0 0 12px;width:100%'>"
-            f"<tr><td style='padding:8px 12px'><table role='presentation' cellpadding='0' cellspacing='0'>{body}</table></td></tr></table>")
+    return (f"<div style='{FONT}font-size:10px;line-height:15px;color:#6b7686;background:#f7f9fb;"
+            f"border-radius:6px;padding:7px 10px;margin:0 0 12px'>{' &nbsp;&middot;&nbsp; '.join(bits)}</div>")
+
+
+def sea_tag(o):
+    status, named = sea_status(o)
+    if status == "named":
+        return (f"<span style='{FONT}display:inline-block;background:{GREEN};color:#ffffff;font-size:10px;"
+                f"font-weight:700;line-height:12px;padding:3px 9px;border-radius:10px;margin:0 0 8px'>"
+                f"Targets SE Asia: {html.escape(', '.join(named))}</span><br>")
+    if status == "all":
+        return (f"<span style='{FONT}display:inline-block;background:#e3f3ea;color:{GREEN};font-size:10px;"
+                f"font-weight:700;line-height:12px;padding:3px 9px;border-radius:10px;margin:0 0 8px'>"
+                "Open to SE Asia (all countries)</span><br>")
+    return ""
 
 
 def offer_card(o):
     e = html.escape
     pills = "".join(
-        f"<span style='display:inline-block;background:#eef2f7;color:#3d4b5c;font-size:12px;"
-        f"line-height:16px;padding:3px 9px;border-radius:10px;margin:0 4px 4px 0'>{e(keyword_name(k))}</span>"
+        f"<span style='display:inline-block;background:#eef2f7;color:#3d4b5c;font-size:10px;"
+        f"line-height:13px;padding:3px 9px;border-radius:10px;margin:0 4px 4px 0'>{e(keyword_name(k))}</span>"
         for k in o["market_keywords"][:4]
     )
     if len(o["market_keywords"]) > 4:
-        pills += f"<span style='font-size:12px;color:#8a94a3'>+{len(o['market_keywords']) - 4} more</span>"
+        pills += f"<span style='font-size:10px;color:#8a94a3'>+{len(o['market_keywords']) - 4} more</span>"
     return (
         "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' "
         "style='background:#ffffff;border:1px solid #e3e7ed;border-radius:8px;margin:0 0 12px'>"
         "<tr><td style='padding:18px 20px'>"
-        f"<a href='{e(o['link'])}' style='{FONT}font-size:16px;line-height:22px;font-weight:600;"
+        f"{sea_tag(o)}"
+        f"<a href='{e(o['link'])}' style='{FONT}font-size:13px;line-height:18px;font-weight:600;"
         f"color:{NAVY};text-decoration:none'>{e(o['title'])}</a>"
-        f"<div style='{FONT}font-size:13px;line-height:18px;color:#6b7686;margin:6px 0 10px'>"
-        f"{e(o['location'])} &nbsp;|&nbsp; {e(', '.join(o['partnership']))}</div>"
-        f"{facts_box(o)}"
-        f"<div style='{FONT}font-size:14px;line-height:21px;color:#2b2f36;margin:0 0 12px'>{e(short_text(o))}</div>"
+        f"<div style='{FONT}font-size:11px;line-height:15px;color:#3d4b5c;margin:6px 0 10px'>"
+        f"<b>{e(o['location'])}</b> &nbsp;|&nbsp; {e(', '.join(o['partnership']))}</div>"
+        f"{facts_line(o)}"
+        f"<div style='{FONT}font-size:12px;line-height:18px;color:#2b2f36;margin:0 0 12px'>{e(short_text(o))}</div>"
         f"<div style='{FONT}margin:0 0 12px'>{pills}</div>"
-        f"<a href='{e(o['link'])}' style='{FONT}display:inline-block;font-size:13px;font-weight:600;"
+        f"<a href='{e(o['link'])}' style='{FONT}display:inline-block;font-size:11px;font-weight:600;"
         f"color:{NAVY};text-decoration:none;border:1px solid {NAVY};border-radius:6px;padding:7px 14px'>"
         "View offer &rarr;</a>"
-        f"<span style='{FONT}font-size:11px;color:#a0a8b4;margin-left:10px'>{e(o['ref'])}</span>"
+        f"<span style='{FONT}font-size:10px;color:#a0a8b4;margin-left:10px'>{e(o['ref'])}</span>"
         "</td></tr></table>"
     )
+
+
+def quick_list(groups, order):
+    """At a glance: one line per offer, by sector."""
+    e = html.escape
+    rows = []
+    for s in order:
+        rows.append(f"<div style='{FONT}font-size:10px;font-weight:700;letter-spacing:1px;color:#8a94a3;"
+                    f"text-transform:uppercase;margin:10px 0 4px'>{e(s)}</div>")
+        for o in groups[s]:
+            status, _ = sea_status(o)
+            dot = {"named": GREEN, "all": "#8fd1ac"}.get(status, "#d5dbe3")
+            title = o["title"] if len(o["title"]) <= 95 else o["title"][:92].rsplit(" ", 1)[0] + "..."
+            rows.append(
+                f"<div style='{FONT}font-size:11px;line-height:16px;color:#2b2f36;margin:0 0 5px'>"
+                f"<span style='color:{dot};font-size:12px'>&#9679;</span>&nbsp; "
+                f"<b>{e(o['location'])}</b> - <a href='{e(o['link'])}' style='color:{NAVY};text-decoration:none'>"
+                f"{e(title)}</a></div>")
+    legend = (f"<div style='{FONT}font-size:10px;color:#8a94a3;margin-top:10px;border-top:1px solid #eef1f5;padding-top:8px'>"
+              f"<span style='color:{GREEN}'>&#9679;</span> targets SE Asia &nbsp; "
+              "<span style='color:#8fd1ac'>&#9679;</span> open to all countries &nbsp; "
+              "<span style='color:#d5dbe3'>&#9679;</span> other markets</div>")
+    return ("<table role='presentation' width='100%' cellpadding='0' cellspacing='0' "
+            "style='background:#ffffff;border:1px solid #e3e7ed;border-radius:8px;margin:0 0 8px'>"
+            f"<tr><td style='padding:14px 20px 14px'><div style='{FONT}font-size:12px;font-weight:700;color:{NAVY}'>"
+            f"At a glance</div>{''.join(rows)}{legend}</td></tr></table>")
 
 
 def build_email(offers):
@@ -384,13 +477,18 @@ def build_email(offers):
     n = len(offers)
     subject = f"EEN Business Offers - {n} new - {today}"
 
-    # Group by country, biggest groups first
+    # Group by sector; inside a sector: SE Asia named first, then all countries, then the rest
+    rank = {"named": 0, "all": 1, "": 2}
     groups = {}
     for o in offers:
-        groups.setdefault(o["location"] or "Other", []).append(o)
-    order = sorted(groups, key=lambda c: (-len(groups[c]), c))
-    by_country = "&nbsp;&middot; ".join(
-        f"{e(c).replace(' ', '&nbsp;')}&nbsp;{len(groups[c])}" for c in order)
+        groups.setdefault(sector_of(o), []).append(o)
+    for s in groups:
+        groups[s].sort(key=lambda o: rank[sea_status(o)[0]])
+    order = [s for s in SECTOR_ORDER if s in groups]
+    sea_named = sum(1 for o in offers if sea_status(o)[0] == "named")
+    sea_all = sum(1 for o in offers if sea_status(o)[0] == "all")
+    by_sector = "&nbsp;&middot; ".join(
+        f"{e(s).replace(' ', '&nbsp;')}&nbsp;{len(groups[s])}" for s in order)
 
     parts = [
         f"<div style='background:#f3f5f8;padding:24px 12px;margin:0'>"
@@ -398,28 +496,31 @@ def build_email(offers):
         "style='max-width:640px;margin:0 auto'><tr><td>",
         # Header
         f"<table role='presentation' width='100%' cellpadding='0' cellspacing='0' "
-        f"style='background:{NAVY};border-radius:8px;margin:0 0 20px'><tr><td style='padding:22px 24px'>"
-        f"<div style='{FONT}font-size:12px;letter-spacing:1px;color:#a9bcd6;text-transform:uppercase'>"
+        f"style='background:{NAVY};border-radius:8px;margin:0 0 12px'><tr><td style='padding:22px 24px'>"
+        f"<div style='{FONT}font-size:10px;letter-spacing:1px;color:#a9bcd6;text-transform:uppercase'>"
         "EEN Business Offers</div>"
-        f"<div style='{FONT}font-size:26px;line-height:32px;font-weight:700;color:#ffffff;margin:4px 0 2px'>"
+        f"<div style='{FONT}font-size:22px;line-height:27px;font-weight:700;color:#ffffff;margin:4px 0 2px'>"
         f"{n} new offer{'s' if n != 1 else ''}</div>"
-        f"<div style='{FONT}font-size:14px;color:#d5deea'>{today}</div>"
-        f"<div style='{FONT}font-size:13px;line-height:20px;color:#d5deea;margin-top:12px;"
-        f"border-top:1px solid #2c4c78;padding-top:12px'>{by_country}</div>"
-        + (f"<a href='{e(link)}' style='{FONT}display:inline-block;margin-top:14px;font-size:13px;"
+        f"<div style='{FONT}font-size:12px;color:#d5deea'>{today} &nbsp;&middot;&nbsp; "
+        f"<b style='color:#ffffff'>{sea_named}</b> target SE Asia, "
+        f"<b style='color:#ffffff'>{sea_all}</b> open to all countries</div>"
+        f"<div style='{FONT}font-size:11px;line-height:17px;color:#d5deea;margin-top:12px;"
+        f"border-top:1px solid #2c4c78;padding-top:12px'>{by_sector}</div>"
+        + (f"<a href='{e(link)}' style='{FONT}display:inline-block;margin-top:14px;font-size:11px;"
            f"font-weight:600;color:{NAVY};background:#ffffff;text-decoration:none;border-radius:6px;"
            f"padding:8px 14px'>{'Open sheet' if SHEET_ID and SHEET_KEY else 'Download Excel'} - all offers &rarr;</a>"
            if link else "")
         + "</td></tr></table>",
+        quick_list(groups, order),
     ]
-    for c in order:
+    for s in order:
         parts.append(
-            f"<div style='{FONT}font-size:12px;font-weight:700;letter-spacing:1px;color:#6b7686;"
-            f"text-transform:uppercase;margin:20px 0 8px 2px'>{e(c)} &nbsp;({len(groups[c])})</div>"
+            f"<div style='{FONT}font-size:10px;font-weight:700;letter-spacing:1px;color:#6b7686;"
+            f"text-transform:uppercase;margin:20px 0 8px 2px'>{e(s)} &nbsp;({len(groups[s])})</div>"
         )
-        parts.extend(offer_card(o) for o in groups[c])
+        parts.extend(offer_card(o) for o in groups[s])
     parts.append(
-        f"<div style='{FONT}font-size:12px;line-height:18px;color:#8a94a3;text-align:center;margin:20px 0 0'>"
+        f"<div style='{FONT}font-size:10px;line-height:15px;color:#8a94a3;text-align:center;margin:20px 0 0'>"
         + (f"Full descriptions of all offers: <a href='{e(link)}' style='color:#6b7686'>all offers sheet</a><br>"
            if link else "")
         + "Source: Enterprise Europe Network - een.ec.europa.eu/partnering-opportunities</div>"
