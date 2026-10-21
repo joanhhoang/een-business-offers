@@ -24,13 +24,15 @@ jobs:
           python-version: "3.12"
 
       - name: Install packages
-        run: pip install requests beautifulsoup4 openpyxl
+        run: pip install requests beautifulsoup4 openpyxl gspread
 
       - name: Check EEN and send email
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EEN_RECIPIENTS: ${{ secrets.EEN_RECIPIENTS }}
+          EEN_SHEET_ID: ${{ secrets.EEN_SHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: python een_monitor.py
 
       - name: Save seen list
