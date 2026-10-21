@@ -6,8 +6,9 @@ Each run:
   1. Reads the newest listing pages (stops when posts are older than LOOKBACK_DAYS).
   2. Keeps only "Business Offer" profiles not seen before (by POD reference).
   3. Opens each new offer to get full details.
-  4. Emails one digest: Title, Location, Type of partnership, Market keywords,
-     Description, Link.
+  4. Adds them as rows to een_offers.xlsx (full history, one row per offer).
+  5. Emails one digest: Title, Location, Type of partnership, Market keywords,
+     Description, Link - with the full Excel file attached.
   5. Saves the seen list (seen_een.json) only after the email is sent,
      so a crash never loses offers - they are simply picked up next run.
 
@@ -29,15 +30,22 @@ import smtplib
 import sys
 import time
 from datetime import datetime, timezone, timedelta
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import requests
 from bs4 import BeautifulSoup
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 
 BASE = "https://een.ec.europa.eu"
 LIST_URL = BASE + "/partnering-opportunities"
 SEEN_FILE = os.environ.get("SEEN_FILE", "seen_een.json")
+EXCEL_FILE = os.environ.get("EXCEL_FILE", "een_offers.xlsx")
+EXCEL_COLUMNS = ["Date found", "Reference", "Title", "Location", "Posted", "Valid until",
+                 "Target market", "Type of partnership", "Market keywords", "Description", "Link"]
+EXCEL_WIDTHS = [12, 18, 50, 16, 13, 13, 30, 30, 45, 90, 50]
 LOOKBACK_DAYS = float(os.environ.get("LOOKBACK_DAYS", "3"))
 MAX_PAGES = int(os.environ.get("MAX_PAGES", "25"))
 WANTED_TYPE = "business offer"
@@ -127,7 +135,39 @@ def parse_detail(page_html):
         "partnership": fields.get("Type of partnership", []),
         "market_keywords": fields.get("Market keywords", []),
         "description": (fields.get("Full Description") or fields.get("Short Summary") or [""])[0],
+        "summary": (fields.get("Short Summary") or [""])[0],
+        "validity": (fields.get("Term of Validity") or [""])[0],
+        "targets": fields.get("Targeted Countries") or fields.get("Targeted countries") or [],
     }
+
+
+def parse_date(text):
+    for fmt in ("%d %B %Y", "%d %b %Y"):
+        try:
+            return datetime.strptime(clean(text), fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def add_dates(o):
+    """Posted = start of Term of Validity (fallback: date inside the POD reference, e.g. BOUA20261016001).
+    Updated = when the offer appeared at the top of the EEN list, if that is later than the posting."""
+    parts = re.split(r"\s+-\s+", o.get("validity") or "")
+    posted = parse_date(parts[0]) if parts and parts[0] else None
+    valid_until = parse_date(parts[1]) if len(parts) > 1 else None
+    if not posted:
+        m = re.search(r"(20\d{2})(\d{2})(\d{2})", o.get("ref", ""))
+        if m:
+            try:
+                posted = datetime(int(m[1]), int(m[2]), int(m[3])).date()
+            except ValueError:
+                pass
+    updated = (datetime.now(timezone(timedelta(hours=7))) - timedelta(days=o.get("age_days", 0))).date()
+    o["posted"] = posted.strftime("%d %b %Y") if posted else ""
+    o["valid_until"] = valid_until.strftime("%d %b %Y") if valid_until else ""
+    o["updated"] = updated.strftime("%d %b %Y") if posted and (updated - posted).days >= 3 else ""
+    return o
 
 
 def load_seen():
@@ -142,6 +182,56 @@ def save_seen(seen):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(seen, f, indent=1, sort_keys=True)
     os.replace(tmp, SEEN_FILE)  # atomic - file is never half-written
+
+
+def save_to_excel(offers):
+    """Add new offers as rows. Skips references already in the file, so a re-run never doubles rows."""
+    wb = None
+    if os.path.exists(EXCEL_FILE):
+        wb = load_workbook(EXCEL_FILE)
+        ws = wb.active
+        if [c.value for c in ws[1]][:len(EXCEL_COLUMNS)] != EXCEL_COLUMNS:
+            # Old column layout - keep it as a backup and start a fresh file
+            os.replace(EXCEL_FILE, EXCEL_FILE.replace(".xlsx", "_old.xlsx"))
+            print("Excel: old column layout saved as backup, starting new file")
+            wb = None
+    if wb is None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Business Offers"
+        ws.append(EXCEL_COLUMNS)
+        for i, w in enumerate(EXCEL_WIDTHS, 1):
+            ws.column_dimensions[ws.cell(1, i).column_letter].width = w
+            c = ws.cell(1, i)
+            c.font = Font(bold=True, color="FFFFFF")
+            c.fill = PatternFill("solid", fgColor="0B5394")
+        ws.freeze_panes = "A2"
+
+    existing = {ws.cell(r, 2).value for r in range(2, ws.max_row + 1)}
+    today = datetime.now(timezone(timedelta(hours=7))).strftime("%Y-%m-%d")
+    added = 0
+    for o in offers:
+        if o["ref"] in existing:
+            continue
+        ws.append([
+            today, o["ref"], o["title"], o["location"],
+            o.get("posted", ""), o.get("valid_until", ""), ", ".join(o.get("targets") or []),
+            ", ".join(o["partnership"]), "\n".join(o["market_keywords"]),
+            o["description"][:32000], o["link"],
+        ])
+        r = ws.max_row
+        n = len(EXCEL_COLUMNS)
+        for col in range(1, n + 1):
+            ws.cell(r, col).alignment = Alignment(wrap_text=True, vertical="top")
+        ws.cell(r, n).hyperlink = o["link"]
+        ws.cell(r, n).font = Font(color="0B5394", underline="single")
+        added += 1
+    ws.auto_filter.ref = f"A1:{ws.cell(1, len(EXCEL_COLUMNS)).column_letter}{ws.max_row}"
+
+    tmp = EXCEL_FILE + ".tmp.xlsx"
+    wb.save(tmp)
+    os.replace(tmp, EXCEL_FILE)  # atomic - file is never half-written
+    print(f"Excel: added {added} row(s), {ws.max_row - 1} offers in total")
 
 
 def collect_cards():
@@ -160,32 +250,130 @@ def collect_cards():
     return all_cards
 
 
+def short_text(o, limit=420):
+    """EEN's own Short Summary if we have it, otherwise the start of the description."""
+    text = clean(o.get("summary") or o.get("description") or "")
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+    return cut[:end + 1] if end > limit * 0.5 else cut.rsplit(" ", 1)[0] + "..."
+
+
+def keyword_name(k):
+    """'07003001 - Wine and liquors' -> 'Wine and liquors'"""
+    return re.sub(r"^\s*\d+\s*-\s*", "", k).strip()
+
+
+FONT = "font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;"  # no quotes - styles sit inside '...'
+NAVY = "#0b2e59"
+
+
+def facts_box(o):
+    """Posted / Valid until / Target market - only the ones we have."""
+    e = html.escape
+    label = f"style='{FONT}font-size:12px;line-height:18px;color:#6b7686;padding:2px 12px 2px 0;white-space:nowrap;vertical-align:top'"
+    value = f"style='{FONT}font-size:13px;line-height:18px;color:#2b2f36;padding:2px 0;vertical-align:top'"
+    rows = []
+    if o.get("posted"):
+        upd = f" <span style='color:#8a94a3'>(updated {e(o['updated'])})</span>" if o.get("updated") else ""
+        rows.append(("Posted", e(o["posted"]) + upd))
+    if o.get("valid_until"):
+        rows.append(("Valid until", e(o["valid_until"])))
+    targets = o.get("targets") or []
+    if targets:
+        shown = ", ".join(targets[:8]) + (f" +{len(targets) - 8} more" if len(targets) > 8 else "")
+        rows.append(("Target market", e(shown)))
+    if not rows:
+        return ""
+    body = "".join(f"<tr><td {label}>{k}</td><td {value}>{v}</td></tr>" for k, v in rows)
+    return ("<table role='presentation' cellpadding='0' cellspacing='0' "
+            "style='background:#f7f9fb;border-radius:6px;margin:0 0 12px;width:100%'>"
+            f"<tr><td style='padding:8px 12px'><table role='presentation' cellpadding='0' cellspacing='0'>{body}</table></td></tr></table>")
+
+
+def offer_card(o):
+    e = html.escape
+    pills = "".join(
+        f"<span style='display:inline-block;background:#eef2f7;color:#3d4b5c;font-size:12px;"
+        f"line-height:16px;padding:3px 9px;border-radius:10px;margin:0 4px 4px 0'>{e(keyword_name(k))}</span>"
+        for k in o["market_keywords"][:4]
+    )
+    if len(o["market_keywords"]) > 4:
+        pills += f"<span style='font-size:12px;color:#8a94a3'>+{len(o['market_keywords']) - 4} more</span>"
+    return (
+        "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' "
+        "style='background:#ffffff;border:1px solid #e3e7ed;border-radius:8px;margin:0 0 12px'>"
+        "<tr><td style='padding:18px 20px'>"
+        f"<a href='{e(o['link'])}' style='{FONT}font-size:16px;line-height:22px;font-weight:600;"
+        f"color:{NAVY};text-decoration:none'>{e(o['title'])}</a>"
+        f"<div style='{FONT}font-size:13px;line-height:18px;color:#6b7686;margin:6px 0 10px'>"
+        f"{e(o['location'])} &nbsp;|&nbsp; {e(', '.join(o['partnership']))}</div>"
+        f"{facts_box(o)}"
+        f"<div style='{FONT}font-size:14px;line-height:21px;color:#2b2f36;margin:0 0 12px'>{e(short_text(o))}</div>"
+        f"<div style='{FONT}margin:0 0 12px'>{pills}</div>"
+        f"<a href='{e(o['link'])}' style='{FONT}display:inline-block;font-size:13px;font-weight:600;"
+        f"color:{NAVY};text-decoration:none;border:1px solid {NAVY};border-radius:6px;padding:7px 14px'>"
+        "View offer &rarr;</a>"
+        f"<span style='{FONT}font-size:11px;color:#a0a8b4;margin-left:10px'>{e(o['ref'])}</span>"
+        "</td></tr></table>"
+    )
+
+
 def build_email(offers):
+    e = html.escape
     today = datetime.now(timezone(timedelta(hours=7))).strftime("%d %b %Y")
-    subject = f"EEN Business Offers - {len(offers)} new - {today}"
+    n = len(offers)
+    subject = f"EEN Business Offers - {n} new - {today}"
+
+    # Group by country, biggest groups first
+    groups = {}
+    for o in offers:
+        groups.setdefault(o["location"] or "Other", []).append(o)
+    order = sorted(groups, key=lambda c: (-len(groups[c]), c))
+    by_country = "&nbsp;&middot; ".join(
+        f"{e(c).replace(' ', '&nbsp;')}&nbsp;{len(groups[c])}" for c in order)
+
     parts = [
-        "<div style='font-family:Arial,sans-serif;font-size:14px;color:#222;max-width:760px'>",
-        f"<h2 style='margin:0 0 4px'>EEN Business Offers - {today}</h2>",
-        f"<p style='margin:0 0 16px;color:#555'>{len(offers)} new offer(s) since the last email.</p>",
+        f"<div style='background:#f3f5f8;padding:24px 12px;margin:0'>"
+        "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' "
+        "style='max-width:640px;margin:0 auto'><tr><td>",
+        # Header
+        f"<table role='presentation' width='100%' cellpadding='0' cellspacing='0' "
+        f"style='background:{NAVY};border-radius:8px;margin:0 0 20px'><tr><td style='padding:22px 24px'>"
+        f"<div style='{FONT}font-size:12px;letter-spacing:1px;color:#a9bcd6;text-transform:uppercase'>"
+        "EEN Business Offers</div>"
+        f"<div style='{FONT}font-size:26px;line-height:32px;font-weight:700;color:#ffffff;margin:4px 0 2px'>"
+        f"{n} new offer{'s' if n != 1 else ''}</div>"
+        f"<div style='{FONT}font-size:14px;color:#d5deea'>{today}</div>"
+        f"<div style='{FONT}font-size:13px;line-height:20px;color:#d5deea;margin-top:12px;"
+        f"border-top:1px solid #2c4c78;padding-top:12px'>{by_country}</div>"
+        "</td></tr></table>",
     ]
-    for i, o in enumerate(offers, 1):
-        desc = html.escape(o["description"]).replace("\n", "<br>")
+    for c in order:
         parts.append(
-            "<div style='border-top:1px solid #ddd;padding:14px 0'>"
-            f"<div style='font-size:16px;font-weight:bold;margin-bottom:6px'>{i}. "
-            f"<a href='{o['link']}' style='color:#0b5394;text-decoration:none'>{html.escape(o['title'])}</a></div>"
-            f"<b>Location:</b> {html.escape(o['location'])}<br>"
-            f"<b>Type of partnership:</b> {html.escape(', '.join(o['partnership']))}<br>"
-            f"<b>Market keywords:</b> {html.escape('; '.join(o['market_keywords']))}<br>"
-            f"<b>Description:</b><br><div style='margin:4px 0 6px'>{desc}</div>"
-            f"<b>Link:</b> <a href='{o['link']}'>{o['link']}</a> ({o['ref']})"
-            "</div>"
+            f"<div style='{FONT}font-size:12px;font-weight:700;letter-spacing:1px;color:#6b7686;"
+            f"text-transform:uppercase;margin:20px 0 8px 2px'>{e(c)} &nbsp;({len(groups[c])})</div>"
         )
-    parts.append("<p style='color:#888;font-size:12px'>Source: Enterprise Europe Network partnering opportunities.</p></div>")
+        parts.extend(offer_card(o) for o in groups[c])
+    parts.append(
+        f"<div style='{FONT}font-size:12px;line-height:18px;color:#8a94a3;text-align:center;margin:20px 0 0'>"
+        "Full descriptions of all offers are in the attached Excel file.<br>"
+        "Source: Enterprise Europe Network - een.ec.europa.eu/partnering-opportunities</div>"
+        "</td></tr></table></div>"
+    )
     return subject, "".join(parts)
 
 
-def send_email(subject, body):
+def build_text(offers):
+    lines = []
+    for o in offers:
+        lines += [o["title"], f"{o['location']} | {', '.join(o['partnership'])}",
+                  short_text(o), o["link"], ""]
+    return "\n".join(lines)
+
+
+def send_email(subject, body, text=""):
     user = os.environ.get("GMAIL_USER")
     pwd = os.environ.get("GMAIL_APP_PASSWORD")
     to = [x.strip() for x in os.environ.get("EEN_RECIPIENTS", user or "").split(",") if x.strip()]
@@ -194,11 +382,19 @@ def send_email(subject, body):
             f.write(body)
         print("No Gmail settings - saved digest_preview.html instead of sending")
         return
-    msg = MIMEMultipart("alternative")
+    msg = MIMEMultipart("mixed")  # "mixed" so the Excel attachment shows in every mail app
     msg["Subject"] = subject
     msg["From"] = user
     msg["To"] = ", ".join(to)
-    msg.attach(MIMEText(body, "html", "utf-8"))
+    content = MIMEMultipart("alternative")
+    content.attach(MIMEText(text or subject, "plain", "utf-8"))
+    content.attach(MIMEText(body, "html", "utf-8"))
+    msg.attach(content)
+    if os.path.exists(EXCEL_FILE):
+        with open(EXCEL_FILE, "rb") as f:
+            part = MIMEApplication(f.read(), Name=os.path.basename(EXCEL_FILE))
+        part["Content-Disposition"] = f'attachment; filename="{os.path.basename(EXCEL_FILE)}"'
+        msg.attach(part)
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
         s.login(user, pwd)
         s.sendmail(user, to, msg.as_string())
@@ -226,12 +422,13 @@ def main():
         except Exception as e:
             print(f"  ! skipped for now (will retry next run): {e}")
             continue
-        offers.append({**c, **{k: v for k, v in d.items() if v}, "ref": c["ref"], "link": c["link"]})
+        offers.append(add_dates({**c, **{k: v for k, v in d.items() if v}, "ref": c["ref"], "link": c["link"]}))
         time.sleep(DELAY)
 
     if offers:
+        save_to_excel(offers)
         subject, body = build_email(offers)
-        send_email(subject, body)
+        send_email(subject, body, build_text(offers))
     else:
         print("No new Business Offers today - no email sent")
 
