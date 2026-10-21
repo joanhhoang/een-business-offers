@@ -1,0 +1,43 @@
+name: EEN Business Offers daily email
+
+on:
+  schedule:
+    - cron: "47 0 * * *"   # every day 07:47 Vietnam time (00:47 UTC)
+  workflow_dispatch:        # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: write           # needed to save seen_een.json back to the repo
+
+concurrency:
+  group: een-monitor
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packages
+        run: pip install requests beautifulsoup4
+
+      - name: Check EEN and send email
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EEN_RECIPIENTS: ${{ secrets.EEN_RECIPIENTS }}
+        run: python een_monitor.py
+
+      - name: Save seen list
+        if: always()
+        run: |
+          git config user.name "een-bot"
+          git config user.email "een-bot@users.noreply.github.com"
+          git add seen_een.json || true
+          git diff --cached --quiet || git commit -m "Update seen EEN offers"
+          git push || true
